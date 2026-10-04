@@ -24,7 +24,7 @@ async def get_alerts() -> dict[str, Any]:
 """
 Returns the active laboratory alerts.
 
-```
+
 This endpoint currently returns sample data.
 It will be connected to the database later.
 """
@@ -51,7 +51,7 @@ return {
         },
     ],
 }
-```
+
 
 # ─────────────────────────────────────────────
 
@@ -89,7 +89,7 @@ return {
         },
     ],
 }
-```
+
 
 # ─────────────────────────────────────────────
 
@@ -117,4 +117,4 @@ return {
         "status": "ACTIVE",
     },
 }
-```
+

@@ -42,7 +42,7 @@ return {
         "average_risk": 8.4,
     },
 }
-```
+
 
 # ─────────────────────────────────────────────
 
@@ -56,7 +56,7 @@ async def get_risk_statistics() -> dict[str, Any]:
 Returns sample risk statistics.
 """
 
-```
+
 return {
     "success": True,
     "risks": {
@@ -70,7 +70,7 @@ return {
         "high": 2.1,
     },
 }
-```
+
 
 # ─────────────────────────────────────────────
 
@@ -84,7 +84,7 @@ async def get_area_statistics() -> dict[str, Any]:
 Returns risk statistics grouped by laboratory area.
 """
 
-```
+
 return {
     "success": True,
     "areas": [
@@ -110,7 +110,7 @@ return {
         },
     ],
 }
-```
+
 
 # ─────────────────────────────────────────────
 
@@ -124,7 +124,7 @@ async def get_recent_alerts() -> dict[str, Any]:
 Returns the most recent laboratory alerts.
 """
 
-```
+
 return {
     "success": True,
     "alerts": [
@@ -151,7 +151,7 @@ return {
         },
     ],
 }
-```
+
 
 # ─────────────────────────────────────────────
 
@@ -165,7 +165,7 @@ async def get_dashboard() -> dict[str, Any]:
 Returns a complete dashboard snapshot.
 """
 
-```
+
 return {
     "success": True,
     "dashboard": {
@@ -201,4 +201,4 @@ return {
         ],
     },
 }
-```
+
