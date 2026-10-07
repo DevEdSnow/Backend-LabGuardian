@@ -1,4 +1,4 @@
-```python
+
 """
 Feature engineering for LabGuardian AI.
 
@@ -382,4 +382,4 @@ def get_feature_names(
         )
 
     return names
-```
+
