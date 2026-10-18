@@ -19,14 +19,19 @@ from app.models.sample import Sample
 from app.models.sample_event import SampleEvent
 from app.services.risk_engine import risk_engine
 
+
 router = APIRouter(
     prefix="/api/risk",
     tags=["Risk"],
 )
 
 
-def get_sample_or_404(db: Session, sample_code: str) -> Sample:
+def get_sample_or_404(
+    db: Session,
+    sample_code: str,
+) -> Sample:
     """Retrieve a sample using its unique code."""
+
     sample = db.scalar(
         select(Sample).where(Sample.code == sample_code)
     )
@@ -42,24 +47,29 @@ def get_sample_or_404(db: Session, sample_code: str) -> Sample:
 
 def serialize_risk(sample: Sample) -> dict[str, Any]:
     """Serialize the persisted risk assessment."""
+
+    if sample.risk_level in ("HIGH", "CRITICAL"):
+        status = "AT_RISK"
+    elif sample.anomaly_detected:
+        status = "REVIEW_REQUIRED"
+    elif sample.risk_level == "MEDIUM":
+        status = "MONITOR"
+    else:
+        status = "NORMAL"
+
     return {
         "sample_code": sample.code,
         "score": sample.risk_score,
         "level": sample.risk_level,
         "anomaly_detected": sample.anomaly_detected,
         "explanation": sample.risk_explanation,
-        "status": (
-            "AT_RISK"
-            if sample.risk_level in ("HIGH", "CRITICAL")
-            else "MONITOR"
-            if sample.risk_level == "MEDIUM"
-            else "NORMAL"
-        ),
+        "status": status,
     }
 
 
 def severity_for_level(level: str) -> str:
     """Map a risk level to event severity."""
+
     return {
         "LOW": "INFO",
         "MEDIUM": "MEDIUM",
@@ -73,13 +83,17 @@ def latest_risk_event(
     sample_id: int,
 ) -> SampleEvent | None:
     """Retrieve the latest risk assessment event."""
+
     return db.scalar(
         select(SampleEvent)
         .where(
             SampleEvent.sample_id == sample_id,
             SampleEvent.event_type == "RISK_ASSESSED",
         )
-        .order_by(SampleEvent.occurred_at.desc(), SampleEvent.id.desc())
+        .order_by(
+            SampleEvent.occurred_at.desc(),
+            SampleEvent.id.desc(),
+        )
         .limit(1)
     )
 
@@ -89,6 +103,7 @@ def get_all_risks(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """List persisted risk assessments for laboratory samples."""
+
     try:
         samples = db.scalars(
             select(Sample).order_by(Sample.id.desc())
@@ -105,6 +120,7 @@ def get_all_risks(
             "total": len(risks),
             "risks": risks,
         }
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -128,6 +144,7 @@ def calculate_risk(
     The calculation uses database values, not measurements
     supplied by the client.
     """
+
     sample_code = data.get("sample_code")
 
     if not isinstance(sample_code, str) or not sample_code.strip():
@@ -147,46 +164,81 @@ def calculate_risk(
 
         score = result["risk_score"]
         level = result["risk_level"]
+        anomaly_detected = result["anomaly_detected"]
+        assessment_status = result.get(
+            "assessment_status",
+            "ASSESSED",
+        )
 
+        # Validate the score.
         if (
             not isinstance(score, (int, float))
             or isinstance(score, bool)
             or not isfinite(score)
             or not 0 <= score <= 100
         ):
-            raise ValueError("Risk engine returned an invalid score.")
+            raise ValueError(
+                "Risk engine returned an invalid score."
+            )
 
+        # Validate the risk level.
         if level not in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
-            raise ValueError("Risk engine returned an invalid level.")
+            raise ValueError(
+                "Risk engine returned an invalid level."
+            )
+
+        # Validate the assessment status.
+        if assessment_status not in (
+            "ASSESSED",
+            "REVIEW_REQUIRED",
+        ):
+            raise ValueError(
+                "Risk engine returned an invalid assessment status."
+            )
+
+        if not isinstance(anomaly_detected, bool):
+            raise ValueError(
+                "Risk engine returned an invalid anomaly flag."
+            )
 
         # Persist calculated risk fields.
         sample.risk_score = score
         sample.risk_level = level
-        sample.anomaly_detected = result["anomaly_detected"]
+        sample.anomaly_detected = anomaly_detected
         sample.risk_explanation = result["risk_explanation"]
         sample.updated_at = datetime.now(timezone.utc)
 
-        # Store the full assessment in the traceability history.
+        # A data-quality issue with LOW risk still requires review.
+        event_severity = severity_for_level(level)
+
+        if anomaly_detected and level == "LOW":
+            event_severity = "MEDIUM"
+
+        # Store the assessment and findings in the traceability history.
         event = SampleEvent(
             sample_id=sample.id,
             event_type="RISK_ASSESSED",
             title=f"Evaluación de riesgo: {level}",
             description=result["risk_explanation"],
             status="COMPLETED",
-            severity=severity_for_level(level),
+            severity=event_severity,
             temperature=sample.current_temperature,
             location=sample.storage_location,
             event_metadata={
                 "risk_score": score,
                 "risk_level": level,
-                "anomaly_detected": result["anomaly_detected"],
-                "findings": result["findings"],
+                "anomaly_detected": anomaly_detected,
+                "assessment_status": assessment_status,
+                "findings": result.get("findings", []),
             },
         )
 
         db.add(sample)
         db.add(event)
+
+        # Save sample and event in the same transaction.
         db.commit()
+
         db.refresh(sample)
         db.refresh(event)
 
@@ -201,8 +253,10 @@ def calculate_risk(
     except HTTPException:
         db.rollback()
         raise
+
     except Exception as exc:
         db.rollback()
+
         raise HTTPException(
             status_code=500,
             detail="Unable to calculate or save the risk assessment.",
@@ -215,6 +269,7 @@ def get_risk_factors(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Retrieve the findings from the latest saved assessment."""
+
     sample = get_sample_or_404(db, sample_code)
     event = latest_risk_event(db, sample.id)
 
@@ -231,6 +286,10 @@ def get_risk_factors(
         "sample_code": sample.code,
         "score": sample.risk_score,
         "level": sample.risk_level,
+        "assessment_status": metadata.get(
+            "assessment_status",
+            "ASSESSED",
+        ),
         "findings": metadata.get("findings", []),
         "assessed_at": (
             event.occurred_at.isoformat()
@@ -246,6 +305,7 @@ def get_sample_risk(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Retrieve the current persisted risk assessment."""
+
     sample = get_sample_or_404(db, sample_code)
 
     if sample.risk_score is None or sample.risk_level is None:
@@ -255,15 +315,12 @@ def get_sample_risk(
         )
 
     event = latest_risk_event(db, sample.id)
+    metadata = event.event_metadata if event is not None else None
 
     return {
         "success": True,
         "risk": serialize_risk(sample),
-        "assessment": (
-            event.event_metadata
-            if event is not None
-            else None
-        ),
+        "assessment": metadata,
         "assessed_at": (
             event.occurred_at.isoformat()
             if event is not None and event.occurred_at
@@ -277,18 +334,25 @@ def get_high_risk_samples(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """List samples classified as HIGH or CRITICAL."""
+
     try:
         samples = db.scalars(
             select(Sample)
-            .where(Sample.risk_level.in_(("HIGH", "CRITICAL")))
+            .where(
+                Sample.risk_level.in_(("HIGH", "CRITICAL"))
+            )
             .order_by(Sample.risk_score.desc())
         ).all()
 
         return {
             "success": True,
             "total": len(samples),
-            "samples": [serialize_risk(sample) for sample in samples],
+            "samples": [
+                serialize_risk(sample)
+                for sample in samples
+            ],
         }
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -301,8 +365,11 @@ def get_risk_summary(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Summarize risk assessments currently stored in PostgreSQL."""
+
     try:
-        samples = db.scalars(select(Sample)).all()
+        samples = db.scalars(
+            select(Sample)
+        ).all()
 
         assessed = [
             sample
@@ -313,17 +380,27 @@ def get_risk_summary(
 
         levels = {
             level: sum(
-                1 for sample in assessed
+                1
+                for sample in assessed
                 if sample.risk_level == level
             )
             for level in ("LOW", "MEDIUM", "HIGH", "CRITICAL")
         }
 
         average_score = (
-            sum(float(sample.risk_score) for sample in assessed)
-            / len(assessed)
+            sum(
+                float(sample.risk_score)
+                for sample in assessed
+            ) / len(assessed)
             if assessed
             else 0.0
+        )
+
+        review_required = sum(
+            1
+            for sample in assessed
+            if sample.anomaly_detected
+            and sample.risk_level not in ("HIGH", "CRITICAL")
         )
 
         return {
@@ -336,9 +413,11 @@ def get_risk_summary(
                 "medium_risk": levels["MEDIUM"],
                 "high_risk": levels["HIGH"],
                 "critical_risk": levels["CRITICAL"],
+                "review_required": review_required,
                 "average_score": round(average_score, 2),
             },
         }
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,
