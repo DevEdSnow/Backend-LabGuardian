@@ -1,0 +1,181 @@
+
+# ============================================================
+# LABGUARDIAN AI — GITIGNORE
+# ============================================================
+
+
+# ============================================================
+# VARIABLES DE ENTORNO Y SECRETOS
+# ============================================================
+
+.env
+.env.*
+!.env.example
+
+*.pem
+*.key
+secrets/
+credentials/
+
+
+# ============================================================
+# PYTHON
+# ============================================================
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+
+*.egg-info/
+.installed.cfg
+*.egg
+
+
+# ============================================================
+# ENTORNOS VIRTUALES
+# ============================================================
+
+.venv/
+venv/
+env/
+ENV/
+virtualenv/
+
+
+# ============================================================
+# HERRAMIENTAS DE DESARROLLO
+# ============================================================
+
+.vscode/
+.idea/
+.spyderproject
+.spyproject/
+.pydevproject
+
+.python-version
+
+
+# ============================================================
+# CACHÉ Y PRUEBAS
+# ============================================================
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+.tox/
+.nox/
+
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+nosetests.xml
+junit.xml
+
+
+# ============================================================
+# BASES DE DATOS LOCALES
+# ============================================================
+
+*.db
+*.sqlite
+*.sqlite3
+
+# No se ignoran migraciones de Alembic.
+# migrations/
+# alembic/
+
+
+# ============================================================
+# MACHINE LEARNING
+# ============================================================
+
+# Modelos entrenados que pueden ser grandes o contener datos
+# sensibles. Versionarlos solo si se decide explícitamente.
+
+models/*.joblib
+models/*.pkl
+models/*.pickle
+models/*.onnx
+models/*.h5
+models/*.keras
+models/*.pt
+models/*.pth
+models/*.safetensors
+
+# Datos y artefactos de entrenamiento
+data/
+datasets/
+artifacts/
+checkpoints/
+mlruns/
+wandb/
+
+
+# ============================================================
+# LOGS
+# ============================================================
+
+logs/
+*.log
+
+
+# ============================================================
+# ARCHIVOS TEMPORALES
+# ============================================================
+
+tmp/
+temp/
+.cache/
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+
+
+# ============================================================
+# SISTEMA OPERATIVO
+# ============================================================
+
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+
+
+# ============================================================
+# DOCUMENTACIÓN GENERADA Y REPORTES
+# ============================================================
+
+site/
+docs/_build/
+report.html
+
+
+# ============================================================
+# ARCHIVOS DE CONFIGURACIÓN LOCAL
+# ============================================================
+
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
