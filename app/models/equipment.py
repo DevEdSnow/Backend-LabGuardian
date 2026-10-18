@@ -270,4 +270,4 @@ class Equipment(Base):
             f"name={self.name!r}, "
             f"status={self.status!r}"
             f")>"
-
+        )
