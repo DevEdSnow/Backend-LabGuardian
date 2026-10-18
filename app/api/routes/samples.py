@@ -2,18 +2,32 @@
 """
 Sample routes for LabGuardian AI.
 
-This module provides endpoints for registering,
-consulting, updating and deleting clinical samples.
-
-The current implementation uses temporary in-memory
-data. It will later be connected to PostgreSQL
-through the sample service and SQLAlchemy models.
+Endpoints para registrar, consultar, actualizar y eliminar muestras
+utilizando PostgreSQL mediante SQLAlchemy y sample_service.
 """
 
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.models.sample import Sample
+from app.services import sample_service
+from app.services.sample_service import (
+    SampleAlreadyExistsError,
+    SampleNotFoundError,
+    SampleServiceError,
+    SampleStateError,
+    SampleValidationError,
+)
+from app.schemas.sample import (
+    SampleCreate,
+    SampleStatus,
+    SampleStatusUpdate,
+    SampleUpdate,
+)
 
 
 router = APIRouter(
@@ -22,650 +36,483 @@ router = APIRouter(
 )
 
 
-# ─────────────────────────────────────────────
-# Temporary mock data
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------
+# Utilidades
+# ---------------------------------------------------------
 
-samples_data: list[dict[str, Any]] = [
-    {
-        "id": 1,
-        "code": "A49281",
-        "sample_type": "Sangre",
-        "patient_reference": "PAT-001",
-        "area": "Hematología",
-        "status": "PROCESSING",
-        "priority": "NORMAL",
-        "collection_date": "2026-10-03T08:10:00Z",
-        "reception_date": "2026-10-03T08:32:00Z",
-        "processing_date": "2026-10-03T09:47:00Z",
-        "temperature": 8.7,
-        "risk_score": 78,
-        "risk_level": "HIGH",
-        "anomaly": True,
-        "notes": "Temperatura de almacenamiento fuera del rango recomendado.",
-    },
-    {
-        "id": 2,
-        "code": "A49292",
-        "sample_type": "Orina",
-        "patient_reference": "PAT-002",
-        "area": "Uroanálisis",
-        "status": "RECEIVED",
-        "priority": "NORMAL",
-        "collection_date": "2026-10-03T09:00:00Z",
-        "reception_date": "2026-10-03T09:42:00Z",
-        "processing_date": None,
-        "temperature": 7.4,
-        "risk_score": 54,
-        "risk_level": "MEDIUM",
-        "anomaly": False,
-        "notes": "Pendiente de procesamiento.",
-    },
-    {
-        "id": 3,
-        "code": "A49301",
-        "sample_type": "Suero",
-        "patient_reference": "PAT-003",
-        "area": "Química Clínica",
-        "status": "PROCESSING",
-        "priority": "URGENT",
-        "collection_date": "2026-10-03T08:40:00Z",
-        "reception_date": "2026-10-03T09:12:00Z",
-        "processing_date": "2026-10-03T10:04:00Z",
-        "temperature": 6.8,
-        "risk_score": 47,
-        "risk_level": "MEDIUM",
-        "anomaly": False,
-        "notes": "Procesamiento prioritario.",
-    },
-]
+def serialize_sample(sample: Sample) -> dict[str, Any]:
+    """Convierte una muestra de SQLAlchemy en una respuesta JSON."""
+    return sample.to_dict()
 
 
-# ─────────────────────────────────────────────
-# GET /api/samples
-# ─────────────────────────────────────────────
+def get_sample_or_404(db: Session, sample_id: int) -> Sample:
+    """Busca una muestra o devuelve HTTP 404."""
+    try:
+        return sample_service.get_sample_by_id(db, sample_id)
+    except SampleNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+
+def handle_service_error(exc: SampleServiceError) -> HTTPException:
+    """Traduce los errores del servicio a respuestas HTTP."""
+    if isinstance(exc, SampleNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+
+    if isinstance(exc, SampleAlreadyExistsError):
+        return HTTPException(status_code=409, detail=str(exc))
+
+    if isinstance(exc, SampleStateError):
+        return HTTPException(status_code=409, detail=str(exc))
+
+    if isinstance(exc, SampleValidationError):
+        return HTTPException(status_code=422, detail=str(exc))
+
+    return HTTPException(
+        status_code=400,
+        detail="No fue posible completar la operación.",
+    )
+
+
+def commit_or_rollback(db: Session) -> None:
+    """Confirma la transacción o revierte la sesión si falla."""
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def database_error() -> HTTPException:
+    """Respuesta genérica para errores inesperados de persistencia."""
+    return HTTPException(
+        status_code=500,
+        detail="Ocurrió un error al acceder a la base de datos.",
+    )
+
+
+# ---------------------------------------------------------
+# GET /api/samples/
+# ---------------------------------------------------------
 
 @router.get("/")
-async def get_samples() -> dict[str, Any]:
-    """
-    Returns all registered clinical samples.
-    """
-
-    return {
-        "success": True,
-        "total": len(samples_data),
-        "samples": samples_data,
-    }
-
-
-# ─────────────────────────────────────────────
-# GET /api/samples/{sample_id}
-# ─────────────────────────────────────────────
-
-@router.get("/{sample_id}")
-async def get_sample(
-    sample_id: int,
+def get_samples(
+    db: Session = Depends(get_db),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=1000),
+    status: str | None = None,
+    priority: str | None = None,
+    sample_type: str | None = None,
+    laboratory_area: str | None = None,
+    risk_level: str | None = None,
+    anomaly_detected: bool | None = None,
+    search: str | None = None,
 ) -> dict[str, Any]:
-    """
-    Returns a specific sample by ID.
-    """
-
-    sample = next(
-        (
-            item
-            for item in samples_data
-            if item["id"] == sample_id
-        ),
-        None,
-    )
-
-    if sample is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Sample not found.",
+    """Lista muestras almacenadas en PostgreSQL con filtros opcionales."""
+    try:
+        result = sample_service.list_samples(
+            db,
+            status=status,
+            priority=priority,
+            sample_type=sample_type,
+            laboratory_area=laboratory_area,
+            risk_level=risk_level,
+            anomaly_detected=anomaly_detected,
+            search=search,
+            limit=page_size,
+            offset=(page - 1) * page_size,
         )
 
-    return {
-        "success": True,
-        "sample": sample,
-    }
+        return {
+            "success": True,
+            "total": result["total"],
+            "page": page,
+            "page_size": page_size,
+            "samples": [
+                serialize_sample(item)
+                for item in result["items"]
+            ],
+        }
+    except SampleServiceError as exc:
+        raise handle_service_error(exc) from exc
+    except Exception as exc:
+        raise database_error() from exc
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------
 # GET /api/samples/code/{sample_code}
-# ─────────────────────────────────────────────
+# Esta ruta específica se declara antes de /{sample_id}.
+# ---------------------------------------------------------
 
 @router.get("/code/{sample_code}")
-async def get_sample_by_code(
+def get_sample_by_code(
     sample_code: str,
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """
-    Returns a sample using its unique sample code.
-    """
+    """Busca una muestra por su código único."""
+    try:
+        sample = sample_service.get_sample_by_code(db, sample_code)
 
-    sample = next(
-        (
-            item
-            for item in samples_data
-            if item["code"] == sample_code
-        ),
-        None,
-    )
+        return {
+            "success": True,
+            "sample": serialize_sample(sample),
+        }
+    except SampleServiceError as exc:
+        raise handle_service_error(exc) from exc
+    except Exception as exc:
+        raise database_error() from exc
 
-    if sample is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Sample not found.",
+
+# ---------------------------------------------------------
+# GET /api/samples/risk/high
+# ---------------------------------------------------------
+
+@router.get("/risk/high")
+def get_high_risk_samples(
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Obtiene las muestras con riesgo alto o crítico."""
+    try:
+        result = sample_service.list_samples(
+            db,
+            risk_level="HIGH",
+            limit=1000,
+        )
+        critical = sample_service.list_samples(
+            db,
+            risk_level="CRITICAL",
+            limit=1000,
         )
 
-    return {
-        "success": True,
-        "sample": sample,
-    }
+        samples = result["items"] + critical["items"]
+
+        return {
+            "success": True,
+            "total": len(samples),
+            "samples": [serialize_sample(item) for item in samples],
+        }
+    except SampleServiceError as exc:
+        raise handle_service_error(exc) from exc
+    except Exception as exc:
+        raise database_error() from exc
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------
+# GET /api/samples/status/{status}
+# ---------------------------------------------------------
+
+@router.get("/status/{status}")
+def get_samples_by_status(
+    status: str,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Filtra las muestras por su estado actual."""
+    try:
+        result = sample_service.list_samples(
+            db,
+            status=status,
+            limit=1000,
+        )
+
+        return {
+            "success": True,
+            "status": status.upper(),
+            "total": result["total"],
+            "samples": [
+                serialize_sample(item)
+                for item in result["items"]
+            ],
+        }
+    except SampleServiceError as exc:
+        raise handle_service_error(exc) from exc
+    except Exception as exc:
+        raise database_error() from exc
+
+
+# ---------------------------------------------------------
+# POST /api/samples/
+# ---------------------------------------------------------
+
+@router.post("/", status_code=201)
+def create_sample(
+    data: SampleCreate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Registra una muestra y su primer evento de trazabilidad."""
+    try:
+        sample = sample_service.create_sample(db, data)
+        commit_or_rollback(db)
+        db.refresh(sample)
+
+        return {
+            "success": True,
+            "message": "Sample registered successfully.",
+            "sample": serialize_sample(sample),
+        }
+    except SampleServiceError as exc:
+        db.rollback()
+        raise handle_service_error(exc) from exc
+    except Exception as exc:
+        db.rollback()
+        raise database_error() from exc
+
+
+# ---------------------------------------------------------
 # GET /api/samples/{sample_id}/status
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------
 
 @router.get("/{sample_id}/status")
-async def get_sample_status(
+def get_sample_status(
     sample_id: int,
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """
-    Returns the current status of a clinical sample.
-    """
-
-    sample = next(
-        (
-            item
-            for item in samples_data
-            if item["id"] == sample_id
-        ),
-        None,
-    )
-
-    if sample is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Sample not found.",
-        )
+    """Consulta el estado y el riesgo actual de una muestra."""
+    sample = get_sample_or_404(db, sample_id)
 
     return {
         "success": True,
-        "sample_code": sample["code"],
-        "status": sample["status"],
-        "priority": sample["priority"],
-        "risk_level": sample["risk_level"],
-        "risk_score": sample["risk_score"],
-        "anomaly": sample["anomaly"],
+        "sample_code": sample.code,
+        "status": sample.status,
+        "priority": sample.priority,
+        "risk_level": sample.risk_level,
+        "risk_score": sample.risk_score,
+        "anomaly": sample.anomaly_detected,
     }
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------
 # GET /api/samples/{sample_id}/passport
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------
 
 @router.get("/{sample_id}/passport")
-async def get_sample_passport(
+def get_sample_passport(
     sample_id: int,
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """
-    Returns the digital passport of a sample.
-
-    The passport provides the main information required
-    to visualize the complete state of a sample.
-    """
-
-    sample = next(
-        (
-            item
-            for item in samples_data
-            if item["id"] == sample_id
-        ),
-        None,
-    )
-
-    if sample is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Sample not found.",
-        )
+    """Devuelve el pasaporte digital de la muestra."""
+    sample = get_sample_or_404(db, sample_id)
 
     return {
         "success": True,
         "passport": {
-            "sample_code": sample["code"],
-            "sample_type": sample["sample_type"],
-            "area": sample["area"],
-            "status": sample["status"],
-            "priority": sample["priority"],
+            "id": sample.id,
+            "sample_code": sample.code,
+            "sample_type": sample.sample_type,
+            "area": sample.laboratory_area,
+            "status": sample.status,
+            "priority": sample.priority,
             "risk": {
-                "score": sample["risk_score"],
-                "level": sample["risk_level"],
+                "score": sample.risk_score,
+                "level": sample.risk_level,
+                "explanation": sample.risk_explanation,
             },
-            "temperature": sample["temperature"],
-            "anomaly": sample["anomaly"],
-            "collection_date": sample["collection_date"],
-            "reception_date": sample["reception_date"],
-            "processing_date": sample["processing_date"],
+            "temperature": sample.current_temperature,
+            "anomaly": sample.anomaly_detected,
+            "collection_date": (
+                sample.collected_at.isoformat()
+                if sample.collected_at else None
+            ),
+            "reception_date": (
+                sample.received_at.isoformat()
+                if sample.received_at else None
+            ),
+            "processing_date": (
+                sample.processed_at.isoformat()
+                if sample.processed_at else None
+            ),
+            "storage_location": sample.storage_location,
+            "notes": sample.notes,
         },
     }
 
 
-# ─────────────────────────────────────────────
-# GET /api/samples/risk/high
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------
+# GET /api/samples/{sample_id}
+# ---------------------------------------------------------
 
-@router.get("/risk/high")
-async def get_high_risk_samples() -> dict[str, Any]:
-    """
-    Returns samples classified as high risk.
-    """
-
-    high_risk_samples = [
-        sample
-        for sample in samples_data
-        if sample["risk_level"] == "HIGH"
-    ]
-
-    return {
-        "success": True,
-        "total": len(high_risk_samples),
-        "samples": high_risk_samples,
-    }
-
-
-# ─────────────────────────────────────────────
-# GET /api/samples/status/{status}
-# ─────────────────────────────────────────────
-
-@router.get("/status/{status}")
-async def get_samples_by_status(
-    status: str,
+@router.get("/{sample_id}")
+def get_sample(
+    sample_id: int,
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """
-    Returns samples filtered by their current status.
-
-    Example:
-        /api/samples/status/PROCESSING
-    """
-
-    normalized_status = status.upper()
-
-    filtered_samples = [
-        sample
-        for sample in samples_data
-        if sample["status"] == normalized_status
-    ]
+    """Busca una muestra por su ID."""
+    sample = get_sample_or_404(db, sample_id)
 
     return {
         "success": True,
-        "status": normalized_status,
-        "total": len(filtered_samples),
-        "samples": filtered_samples,
+        "sample": serialize_sample(sample),
     }
 
 
-# ─────────────────────────────────────────────
-# POST /api/samples
-# ─────────────────────────────────────────────
-
-@router.post("/")
-async def create_sample(
-    sample: dict[str, Any],
-) -> dict[str, Any]:
-    """
-    Registers a new clinical sample.
-
-    Example request:
-
-    {
-        "code": "A49350",
-        "sample_type": "Sangre",
-        "patient_reference": "PAT-010",
-        "area": "Hematología",
-        "priority": "NORMAL",
-        "temperature": 5.2
-    }
-
-    PostgreSQL persistence will be implemented later.
-    """
-
-    code = sample.get("code")
-
-    if not code:
-        raise HTTPException(
-            status_code=400,
-            detail="Sample code is required.",
-        )
-
-    existing_sample = next(
-        (
-            item
-            for item in samples_data
-            if item["code"] == code
-        ),
-        None,
-    )
-
-    if existing_sample is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="A sample with this code already exists.",
-        )
-
-    now = datetime.now(
-        timezone.utc
-    ).isoformat()
-
-    new_id = (
-        max(
-            (
-                item["id"]
-                for item in samples_data
-            ),
-            default=0,
-        )
-        + 1
-    )
-
-    new_sample = {
-        "id": new_id,
-        "code": code,
-        "sample_type": sample.get(
-            "sample_type",
-            "Unknown",
-        ),
-        "patient_reference": sample.get(
-            "patient_reference",
-        ),
-        "area": sample.get(
-            "area",
-            "General",
-        ),
-        "status": sample.get(
-            "status",
-            "RECEIVED",
-        ),
-        "priority": sample.get(
-            "priority",
-            "NORMAL",
-        ),
-        "collection_date": sample.get(
-            "collection_date",
-            now,
-        ),
-        "reception_date": sample.get(
-            "reception_date",
-            now,
-        ),
-        "processing_date": sample.get(
-            "processing_date",
-        ),
-        "temperature": sample.get(
-            "temperature",
-        ),
-        "risk_score": sample.get(
-            "risk_score",
-            0,
-        ),
-        "risk_level": sample.get(
-            "risk_level",
-            "LOW",
-        ),
-        "anomaly": sample.get(
-            "anomaly",
-            False,
-        ),
-        "notes": sample.get(
-            "notes",
-            "",
-        ),
-    }
-
-    samples_data.append(new_sample)
-
-    return {
-        "success": True,
-        "message": "Sample registered successfully.",
-        "sample": new_sample,
-    }
-
-
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------
 # PUT /api/samples/{sample_id}
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------
 
 @router.put("/{sample_id}")
-async def update_sample(
+def update_sample(
     sample_id: int,
-    sample: dict[str, Any],
+    data: SampleUpdate,
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """
-    Updates an existing clinical sample.
-    """
+    """Actualiza los campos editables y registra el evento."""
+    try:
+        sample = sample_service.update_sample(db, sample_id, data)
+        commit_or_rollback(db)
+        db.refresh(sample)
 
-    existing_sample = next(
-        (
-            item
-            for item in samples_data
-            if item["id"] == sample_id
-        ),
-        None,
-    )
-
-    if existing_sample is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Sample not found.",
-        )
-
-    if "code" in sample:
-        duplicated_code = next(
-            (
-                item
-                for item in samples_data
-                if item["code"] == sample["code"]
-                and item["id"] != sample_id
-            ),
-            None,
-        )
-
-        if duplicated_code is not None:
-            raise HTTPException(
-                status_code=409,
-                detail="A sample with this code already exists.",
-            )
-
-    existing_sample.update(sample)
-
-    return {
-        "success": True,
-        "message": "Sample updated successfully.",
-        "sample": existing_sample,
-    }
+        return {
+            "success": True,
+            "message": "Sample updated successfully.",
+            "sample": serialize_sample(sample),
+        }
+    except SampleServiceError as exc:
+        db.rollback()
+        raise handle_service_error(exc) from exc
+    except Exception as exc:
+        db.rollback()
+        raise database_error() from exc
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------
 # PATCH /api/samples/{sample_id}/status
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------
 
 @router.patch("/{sample_id}/status")
-async def update_sample_status(
+def update_sample_status(
     sample_id: int,
-    data: dict[str, Any],
+    data: SampleStatusUpdate,
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """
-    Updates only the status of a clinical sample.
-
-    Example request:
-
-    {
-        "status": "PROCESSING"
-    }
-    """
-
-    existing_sample = next(
-        (
-            item
-            for item in samples_data
-            if item["id"] == sample_id
-        ),
-        None,
-    )
-
-    if existing_sample is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Sample not found.",
+    """Actualiza el estado y registra la trazabilidad."""
+    try:
+        sample = sample_service.update_sample_status(
+            db,
+            sample_id,
+            data,
         )
+        commit_or_rollback(db)
+        db.refresh(sample)
 
-    status = data.get("status")
-
-    if not status:
-        raise HTTPException(
-            status_code=400,
-            detail="status is required.",
-        )
-
-    existing_sample["status"] = status.upper()
-
-    return {
-        "success": True,
-        "message": "Sample status updated successfully.",
-        "sample_code": existing_sample["code"],
-        "status": existing_sample["status"],
-    }
+        return {
+            "success": True,
+            "message": "Sample status updated successfully.",
+            "sample_code": sample.code,
+            "status": sample.status,
+        }
+    except SampleServiceError as exc:
+        db.rollback()
+        raise handle_service_error(exc) from exc
+    except Exception as exc:
+        db.rollback()
+        raise database_error() from exc
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------
 # PATCH /api/samples/{sample_id}/risk
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------
 
 @router.patch("/{sample_id}/risk")
-async def update_sample_risk(
+def update_sample_risk(
     sample_id: int,
     data: dict[str, Any],
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """
-    Updates the risk information of a sample.
+    Actualiza los datos de riesgo de una muestra.
 
-    This endpoint will later be called by the
-    Machine Learning risk engine.
+    Este endpoint actualiza los campos de riesgo almacenados.
+    La predicción real debe proceder del motor de riesgo de LabGuardian.
     """
-
-    existing_sample = next(
-        (
-            item
-            for item in samples_data
-            if item["id"] == sample_id
-        ),
-        None,
-    )
-
-    if existing_sample is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Sample not found.",
-        )
+    sample = get_sample_or_404(db, sample_id)
 
     score = data.get("risk_score")
 
     if score is None:
         raise HTTPException(
-            status_code=400,
+            status_code=422,
             detail="risk_score is required.",
         )
 
     try:
         score = float(score)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
         raise HTTPException(
-            status_code=400,
+            status_code=422,
             detail="risk_score must be a number.",
-        )
+        ) from exc
 
     if not 0 <= score <= 100:
         raise HTTPException(
-            status_code=400,
+            status_code=422,
             detail="risk_score must be between 0 and 100.",
         )
 
-    if score >= 70:
-        risk_level = "HIGH"
-    elif score >= 40:
-        risk_level = "MEDIUM"
-    else:
-        risk_level = "LOW"
-
-    existing_sample["risk_score"] = score
-    existing_sample["risk_level"] = risk_level
-
-    return {
-        "success": True,
-        "message": "Sample risk updated successfully.",
-        "sample_code": existing_sample["code"],
-        "risk_score": score,
-        "risk_level": risk_level,
-    }
-
-
-# ─────────────────────────────────────────────
-# DELETE /api/samples/{sample_id}
-# ─────────────────────────────────────────────
-
-@router.delete("/{sample_id}")
-async def delete_sample(
-    sample_id: int,
-) -> dict[str, Any]:
-    """
-    Deletes a clinical sample.
-    """
-
-    sample = next(
-        (
-            item
-            for item in samples_data
-            if item["id"] == sample_id
-        ),
-        None,
+    level = (
+        "CRITICAL" if score >= 85
+        else "HIGH" if score >= 70
+        else "MEDIUM" if score >= 40
+        else "LOW"
     )
 
-    if sample is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Sample not found.",
-        )
+    try:
+        sample.risk_score = score
+        sample.risk_level = level
+        sample.anomaly_detected = bool(data.get("anomaly_detected", False))
 
-    samples_data.remove(sample)
+        if "risk_explanation" in data:
+            sample.risk_explanation = data["risk_explanation"]
 
-    return {
-        "success": True,
-        "message": "Sample deleted successfully.",
-        "sample_id": sample_id,
-        "sample_code": sample["code"],
-    }
+        sample.updated_at = datetime.now(timezone.utc)
 
+        db.add(sample)
+        commit_or_rollback(db)
+        db.refresh(sample)
 
-## Con este archivo ya tienes la base para:
-
-
-##GET    /api/samples/
-##GET    /api/samples/{id}
-##GET    /api/samples/code/{code}
-##GET    /api/samples/{id}/status
-##GET    /api/samples/{id}/passport
-##GET    /api/samples/risk/high
-##GET    /api/samples/status/{status}
-
-##POST   /api/samples/
-
-##PUT    /api/samples/{id}
-##PATCH  /api/samples/{id}/status
-##PATCH  /api/samples/{id}/risk
-
-##DELETE /api/samples/{id}
+        return {
+            "success": True,
+            "message": "Sample risk updated successfully.",
+            "sample_code": sample.code,
+            "risk_score": sample.risk_score,
+            "risk_level": sample.risk_level,
+            "anomaly_detected": sample.anomaly_detected,
+        }
+    except Exception as exc:
+        db.rollback()
+        raise database_error() from exc
 
 
-## **Ojo con el orden:** en FastAPI las rutas específicas como `/code/{sample_code}`, `/risk/high` y `/status/{status}` deben estar antes de `/{sample_id}`. En el archivo anterior están colocadas así para evitar que `"code"`, `"risk"` o `"status"` se intenten convertir en `int`.
+# ---------------------------------------------------------
+# DELETE /api/samples/{sample_id}
+# ---------------------------------------------------------
+
+@router.delete("/{sample_id}")
+def delete_sample(
+    sample_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Elimina una muestra de PostgreSQL.
+
+    Nota: el modelo define ON DELETE CASCADE para sus eventos.
+    Si el laboratorio necesita conservar permanentemente el historial,
+    conviene sustituir esta operación por rechazo o descarte.
+    """
+    sample = get_sample_or_404(db, sample_id)
+    sample_id_value = sample.id
+    code = sample.code
+
+    try:
+        db.delete(sample)
+        commit_or_rollback(db)
+
+        return {
+            "success": True,
+            "message": "Sample deleted successfully.",
+            "sample_id": sample_id_value,
+            "sample_code": code,
+        }
+    except Exception as exc:
+        db.rollback()
+        raise database_error() from exc
