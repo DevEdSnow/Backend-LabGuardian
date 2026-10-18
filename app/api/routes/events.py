@@ -2,264 +2,537 @@
 """
 Event routes for LabGuardian AI.
 
-This module manages traceability events associated
-with clinical samples.
+Traceability events are persisted in PostgreSQL through SQLAlchemy.
 """
 
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.models.sample import Sample
+from app.models.sample_event import SampleEvent
+from app.schemas.sample_event import (
+    SampleEventSeverity,
+    SampleEventStatus,
+    SampleEventType,
+)
 
 router = APIRouter(
     prefix="/api/events",
     tags=["Events"],
 )
 
-# Temporary mock data. PostgreSQL integration will follow.
-events_data: list[dict[str, Any]] = [
-    {
-        "id": 1,
-        "sample_code": "A49281",
-        "event_type": "RECEPTION",
-        "status": "COMPLETED",
-        "description": "Muestra recibida en el laboratorio.",
-        "location": "Recepción",
-        "temperature": 5.2,
-        "performed_by": "Sistema",
-        "timestamp": "2026-10-03T08:32:00Z",
-    },
-    {
-        "id": 2,
-        "sample_code": "A49281",
-        "event_type": "IDENTIFICATION",
-        "status": "COMPLETED",
-        "description": "Muestra identificada y registrada.",
-        "location": "Recepción",
-        "temperature": 5.4,
-        "performed_by": "Sistema",
-        "timestamp": "2026-10-03T08:35:00Z",
-    },
-    {
-        "id": 3,
-        "sample_code": "A49281",
-        "event_type": "TRANSPORT",
-        "status": "COMPLETED",
-        "description": "Muestra trasladada al área de procesamiento.",
-        "location": "Transporte interno",
-        "temperature": 7.8,
-        "performed_by": "Operador-01",
-        "timestamp": "2026-10-03T09:02:00Z",
-    },
-    {
-        "id": 4,
-        "sample_code": "A49281",
-        "event_type": "STORAGE",
-        "status": "WARNING",
-        "description": (
-            "Temperatura de almacenamiento fuera "
-            "del rango recomendado."
+
+# ---------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------
+
+def enum_values(enum_class) -> set[str]:
+    """Return the accepted values of an enum."""
+    return {item.value for item in enum_class}
+
+
+def normalize_event_type(value: str) -> str:
+    """Translate legacy event names into supported event types."""
+    aliases = {
+        "RECEPTION": "RECEIVED",
+        "IDENTIFICATION": "IDENTIFIED",
+        "TRANSPORT": "TRANSPORT_COMPLETED",
+        "STORAGE": "STORAGE_STARTED",
+        "RESULT": "RESULT_RELEASED",
+    }
+
+    normalized = str(value).strip().upper()
+    normalized = aliases.get(normalized, normalized)
+
+    if normalized not in enum_values(SampleEventType):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported event_type: {value}",
+        )
+
+    return normalized
+
+
+def normalize_status(value: str) -> str:
+    """Validate an event status."""
+    normalized = str(value).strip().upper()
+
+    if normalized == "WARNING":
+        normalized = "COMPLETED"
+
+    if normalized not in enum_values(SampleEventStatus):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported event status: {value}",
+        )
+
+    return normalized
+
+
+def normalize_severity(value: str | None) -> str:
+    """Validate event severity."""
+    normalized = str(value or "INFO").strip().upper()
+
+    if normalized == "WARNING":
+        normalized = "MEDIUM"
+
+    if normalized not in enum_values(SampleEventSeverity):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported event severity: {value}",
+        )
+
+    return normalized
+
+
+def parse_timestamp(value: Any) -> datetime:
+    """Parse an ISO timestamp or use the current UTC time."""
+    if value is None:
+        return datetime.now(timezone.utc)
+
+    if isinstance(value, datetime):
+        result = value
+    elif isinstance(value, str):
+        try:
+            result = datetime.fromisoformat(
+                value.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="timestamp must be a valid ISO 8601 date.",
+            ) from exc
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="timestamp must be an ISO 8601 string.",
+        )
+
+    if result.tzinfo is None:
+        result = result.replace(tzinfo=timezone.utc)
+
+    return result
+
+
+def serialize_event(
+    event: SampleEvent,
+    sample_code: str,
+) -> dict[str, Any]:
+    """Serialize a database event using the existing API response shape."""
+    occurred_at = event.occurred_at
+
+    return {
+        "id": event.id,
+        "sample_id": event.sample_id,
+        "sample_code": sample_code,
+        "event_type": event.event_type,
+        "title": event.title,
+        "status": event.status,
+        "severity": event.severity,
+        "description": event.description,
+        "location": event.location,
+        "temperature": event.temperature,
+        "duration_minutes": event.duration_minutes,
+        "performed_by": event.performed_by,
+        "timestamp": (
+            occurred_at.isoformat()
+            if occurred_at is not None
+            else None
         ),
-        "location": "Refrigerador R-02",
-        "temperature": 8.7,
-        "performed_by": "Sistema",
-        "timestamp": "2026-10-03T09:21:00Z",
-    },
-    {
-        "id": 5,
-        "sample_code": "A49281",
-        "event_type": "PROCESSING",
-        "status": "COMPLETED",
-        "description": "Muestra enviada a procesamiento.",
-        "location": "Hematología",
-        "temperature": 5.1,
-        "performed_by": "Operador-02",
-        "timestamp": "2026-10-03T09:47:00Z",
-    },
-    {
-        "id": 6,
-        "sample_code": "A49281",
-        "event_type": "RESULT",
-        "status": "COMPLETED",
-        "description": "Resultado generado y validado.",
-        "location": "Hematología",
-        "temperature": 5.0,
-        "performed_by": "Sistema",
-        "timestamp": "2026-10-03T10:03:00Z",
-    },
-]
+        "created_at": (
+            event.created_at.isoformat()
+            if event.created_at is not None
+            else None
+        ),
+    }
 
 
-def find_event(event_id: int) -> dict[str, Any]:
-    """Find an event by ID or raise HTTP 404."""
-    event = next(
-        (item for item in events_data if item["id"] == event_id),
-        None,
-    )
+def get_event_or_404(
+    db: Session,
+    event_id: int,
+) -> tuple[SampleEvent, Sample]:
+    """Retrieve an event and its sample."""
+    row = db.execute(
+        select(SampleEvent, Sample)
+        .join(Sample, Sample.id == SampleEvent.sample_id)
+        .where(SampleEvent.id == event_id)
+    ).first()
 
-    if event is None:
+    if row is None:
         raise HTTPException(
             status_code=404,
             detail="Event not found.",
         )
 
-    return event
+    return row[0], row[1]
 
+
+def get_sample_or_404(
+    db: Session,
+    sample_code: str,
+) -> Sample:
+    """Retrieve a sample by its unique code."""
+    sample = db.scalar(
+        select(Sample).where(Sample.code == sample_code)
+    )
+
+    if sample is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Sample not found.",
+        )
+
+    return sample
+
+
+def get_events_for_sample(
+    db: Session,
+    sample_code: str,
+) -> tuple[Sample, list[SampleEvent]]:
+    """Retrieve a sample and its persisted events in chronological order."""
+    sample = get_sample_or_404(db, sample_code)
+
+    events = list(
+        db.scalars(
+            select(SampleEvent)
+            .where(SampleEvent.sample_id == sample.id)
+            .order_by(
+                SampleEvent.occurred_at.asc(),
+                SampleEvent.id.asc(),
+            )
+        ).all()
+    )
+
+    return sample, events
+
+
+# ---------------------------------------------------------
+# GET /api/events/
+# ---------------------------------------------------------
 
 @router.get("/")
-async def get_events() -> dict[str, Any]:
-    """Return all traceability events."""
-    return {
-        "success": True,
-        "total": len(events_data),
-        "events": events_data,
-    }
+def get_events(
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return all persisted traceability events."""
+    try:
+        rows = db.execute(
+            select(SampleEvent, Sample)
+            .join(Sample, Sample.id == SampleEvent.sample_id)
+            .order_by(
+                SampleEvent.occurred_at.desc(),
+                SampleEvent.id.desc(),
+            )
+        ).all()
 
+        events = [
+            serialize_event(event, sample.code)
+            for event, sample in rows
+        ]
+
+        return {
+            "success": True,
+            "total": len(events),
+            "events": events,
+        }
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not retrieve traceability events.",
+        ) from exc
+
+
+# ---------------------------------------------------------
+# GET /api/events/sample/{sample_code}/timeline
+# ---------------------------------------------------------
 
 @router.get("/sample/{sample_code}/timeline")
-async def get_sample_timeline(
+def get_sample_timeline(
     sample_code: str,
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Return a simplified timeline for a sample."""
-    sample_events = [
-        event
-        for event in events_data
-        if event["sample_code"] == sample_code
-    ]
+    """Return the chronological timeline of a sample."""
+    try:
+        sample, events = get_events_for_sample(db, sample_code)
 
-    if not sample_events:
-        raise HTTPException(
-            status_code=404,
-            detail="No events found for this sample.",
-        )
+        timeline = [
+            {
+                "event_type": event.event_type,
+                "title": event.title,
+                "status": event.status,
+                "severity": event.severity,
+                "location": event.location,
+                "timestamp": (
+                    event.occurred_at.isoformat()
+                    if event.occurred_at else None
+                ),
+            }
+            for event in events
+        ]
 
-    timeline = [
-        {
-            "event_type": event["event_type"],
-            "status": event["status"],
-            "location": event["location"],
-            "timestamp": event["timestamp"],
+        return {
+            "success": True,
+            "sample_code": sample.code,
+            "total": len(timeline),
+            "timeline": timeline,
         }
-        for event in sample_events
-    ]
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not retrieve the sample timeline.",
+        ) from exc
 
-    return {
-        "success": True,
-        "sample_code": sample_code,
-        "timeline": timeline,
-    }
 
+# ---------------------------------------------------------
+# GET /api/events/sample/{sample_code}
+# ---------------------------------------------------------
 
 @router.get("/sample/{sample_code}")
-async def get_sample_events(
+def get_sample_events(
     sample_code: str,
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Return the traceability history for a sample."""
-    sample_events = [
-        event
-        for event in events_data
-        if event["sample_code"] == sample_code
-    ]
+    """Return all persisted events associated with a sample."""
+    try:
+        sample, events = get_events_for_sample(db, sample_code)
 
-    if not sample_events:
+        serialized = [
+            serialize_event(event, sample.code)
+            for event in events
+        ]
+
+        return {
+            "success": True,
+            "sample_code": sample.code,
+            "total": len(serialized),
+            "events": serialized,
+        }
+    except SQLAlchemyError as exc:
         raise HTTPException(
-            status_code=404,
-            detail="No events found for this sample.",
-        )
-
-    return {
-        "success": True,
-        "sample_code": sample_code,
-        "total": len(sample_events),
-        "events": sample_events,
-    }
+            status_code=500,
+            detail="Could not retrieve the sample events.",
+        ) from exc
 
 
-@router.get("/{event_id}")
-async def get_event(event_id: int) -> dict[str, Any]:
-    """Return a specific traceability event."""
-    return {
-        "success": True,
-        "event": find_event(event_id),
-    }
+# ---------------------------------------------------------
+# POST /api/events/
+# ---------------------------------------------------------
 
-
-@router.post("/")
-async def create_event(
-    event: dict[str, Any],
+@router.post("/", status_code=201)
+def create_event(
+    data: dict[str, Any],
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Create a new traceability event in temporary memory."""
-    sample_code = event.get("sample_code")
-    event_type = event.get("event_type")
+    """Create a traceability event in PostgreSQL."""
+    sample_code = data.get("sample_code")
+    event_type = data.get("event_type")
 
     if not sample_code or not event_type:
         raise HTTPException(
-            status_code=400,
+            status_code=422,
             detail="sample_code and event_type are required.",
         )
 
-    new_id = max(
-        (item["id"] for item in events_data),
-        default=0,
-    ) + 1
+    try:
+        sample = get_sample_or_404(db, str(sample_code))
 
-    new_event = {
-        "id": new_id,
-        "sample_code": sample_code,
-        "event_type": event_type,
-        "status": event.get("status", "COMPLETED"),
-        "description": event.get("description", ""),
-        "location": event.get("location", ""),
-        "temperature": event.get("temperature"),
-        "performed_by": event.get("performed_by", "Sistema"),
-        "timestamp": event.get(
-            "timestamp",
-            datetime.now(timezone.utc).isoformat(),
-        ),
-    }
+        normalized_type = normalize_event_type(str(event_type))
+        status = normalize_status(data.get("status", "COMPLETED"))
+        severity = normalize_severity(data.get("severity"))
 
-    events_data.append(new_event)
+        temperature = data.get("temperature")
+        if temperature is not None:
+            temperature = float(temperature)
 
-    return {
-        "success": True,
-        "message": "Event created successfully.",
-        "event": new_event,
-    }
+        duration = data.get("duration_minutes")
+        if duration is not None:
+            duration = float(duration)
 
-
-@router.put("/{event_id}")
-async def update_event(
-    event_id: int,
-    event: dict[str, Any],
-) -> dict[str, Any]:
-    """Update an existing traceability event."""
-    existing_event = find_event(event_id)
-
-    if "id" in event and event["id"] != event_id:
-        raise HTTPException(
-            status_code=400,
-            detail="The event ID cannot be changed.",
+        event = SampleEvent(
+            sample_id=sample.id,
+            event_type=normalized_type,
+            title=str(data.get("title") or normalized_type.replace("_", " ").title()),
+            description=str(data.get("description") or ""),
+            status=status,
+            severity=severity,
+            temperature=temperature,
+            duration_minutes=duration,
+            location=data.get("location"),
+            performed_by=data.get("performed_by", "Sistema"),
+            equipment_id=data.get("equipment_id"),
+            event_metadata=data.get("event_metadata"),
+            occurred_at=parse_timestamp(
+                data.get("timestamp", data.get("occurred_at"))
+            ),
         )
 
-    existing_event.update(event)
+        db.add(event)
+        db.commit()
+        db.refresh(event)
 
-    return {
-        "success": True,
-        "message": "Event updated successfully.",
-        "event": existing_event,
-    }
+        return {
+            "success": True,
+            "message": "Event created successfully.",
+            "event": serialize_event(event, sample.code),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except (TypeError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail="One or more event fields have invalid values.",
+        ) from exc
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save the traceability event.",
+        ) from exc
 
+
+# ---------------------------------------------------------
+# GET /api/events/{event_id}
+# ---------------------------------------------------------
+
+@router.get("/{event_id}")
+def get_event(
+    event_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return a persisted event."""
+    try:
+        event, sample = get_event_or_404(db, event_id)
+
+        return {
+            "success": True,
+            "event": serialize_event(event, sample.code),
+        }
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not retrieve the event.",
+        ) from exc
+
+
+# ---------------------------------------------------------
+# PUT /api/events/{event_id}
+# ---------------------------------------------------------
+
+@router.put("/{event_id}")
+def update_event(
+    event_id: int,
+    data: dict[str, Any],
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Update editable fields of a persisted event."""
+    try:
+        event, sample = get_event_or_404(db, event_id)
+
+        if "id" in data and data["id"] != event_id:
+            raise HTTPException(
+                status_code=400,
+                detail="The event ID cannot be changed.",
+            )
+
+        if "sample_code" in data and data["sample_code"] != sample.code:
+            raise HTTPException(
+                status_code=400,
+                detail="The event cannot be reassigned to another sample.",
+            )
+
+        if "sample_id" in data and data["sample_id"] != sample.id:
+            raise HTTPException(
+                status_code=400,
+                detail="The event cannot be reassigned to another sample.",
+            )
+
+        if "event_type" in data:
+            event.event_type = normalize_event_type(data["event_type"])
+
+        if "status" in data:
+            event.status = normalize_status(data["status"])
+
+        if "severity" in data:
+            event.severity = normalize_severity(data["severity"])
+
+        if "timestamp" in data or "occurred_at" in data:
+            event.occurred_at = parse_timestamp(
+                data.get("timestamp", data.get("occurred_at"))
+            )
+
+        for field in (
+            "title",
+            "description",
+            "location",
+            "performed_by",
+            "temperature",
+            "duration_minutes",
+            "equipment_id",
+            "event_metadata",
+        ):
+            if field in data:
+                setattr(event, field, data[field])
+
+        db.commit()
+        db.refresh(event)
+
+        return {
+            "success": True,
+            "message": "Event updated successfully.",
+            "event": serialize_event(event, sample.code),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except (TypeError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail="One or more event fields have invalid values.",
+        ) from exc
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not update the event.",
+        ) from exc
+
+
+# ---------------------------------------------------------
+# DELETE /api/events/{event_id}
+# ---------------------------------------------------------
 
 @router.delete("/{event_id}")
-async def delete_event(
+def delete_event(
     event_id: int,
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Delete a traceability event from temporary memory."""
-    event = find_event(event_id)
-    events_data.remove(event)
+    """Delete a persisted event."""
+    try:
+        event, _sample = get_event_or_404(db, event_id)
 
-    return {
-        "success": True,
-        "message": "Event deleted successfully.",
-        "event_id": event_id,
-    }
+        db.delete(event)
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Event deleted successfully.",
+            "event_id": event_id,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not delete the event.",
+        ) from exc

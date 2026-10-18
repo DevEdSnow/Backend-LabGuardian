@@ -1,4 +1,3 @@
-```python
 """
 Risk routes for LabGuardian AI.
 
@@ -11,21 +10,17 @@ risk calculation. Later it will be connected
 to the Machine Learning risk engine.
 """
 
+from math import isfinite
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-
 
 router = APIRouter(
     prefix="/api/risk",
     tags=["Risk"],
 )
 
-
-# ─────────────────────────────────────────────
-# Temporary mock risk data
-# ─────────────────────────────────────────────
-
+# Temporary mock risk data.
 risk_data: dict[str, dict[str, Any]] = {
     "A49281": {
         "sample_code": "A49281",
@@ -115,21 +110,14 @@ risk_data: dict[str, dict[str, Any]] = {
 }
 
 
-# ─────────────────────────────────────────────
-# Risk calculation helpers
-# ─────────────────────────────────────────────
+# Risk calculation helpers.
 
 def calculate_temperature_risk(
     temperature: float,
     minimum: float = 2.0,
     maximum: float = 8.0,
 ) -> int:
-    """
-    Calculates the risk contribution caused by temperature.
-
-    Returns a value between 0 and 40.
-    """
-
+    """Calculate temperature risk, from 0 to 40."""
     if minimum <= temperature <= maximum:
         return 0
 
@@ -139,7 +127,6 @@ def calculate_temperature_risk(
     )
 
     risk = int(difference * 10)
-
     return min(risk, 40)
 
 
@@ -147,18 +134,11 @@ def calculate_processing_risk(
     processing_minutes: float,
     recommended_minutes: float = 60.0,
 ) -> int:
-    """
-    Calculates the risk contribution caused by
-    excessive processing time.
-
-    Returns a value between 0 and 30.
-    """
-
+    """Calculate processing-time risk, from 0 to 30."""
     if processing_minutes <= recommended_minutes:
         return 0
 
     excess = processing_minutes - recommended_minutes
-
     risk = int(excess * 0.8)
 
     return min(risk, 30)
@@ -168,28 +148,18 @@ def calculate_transport_risk(
     transport_minutes: float,
     recommended_minutes: float = 30.0,
 ) -> int:
-    """
-    Calculates the risk contribution caused by
-    excessive transport time.
-
-    Returns a value between 0 and 20.
-    """
-
+    """Calculate transport-time risk, from 0 to 20."""
     if transport_minutes <= recommended_minutes:
         return 0
 
     excess = transport_minutes - recommended_minutes
-
     risk = int(excess * 0.5)
 
     return min(risk, 20)
 
 
 def get_risk_level(score: int) -> str:
-    """
-    Converts a numerical risk score into a risk level.
-    """
-
+    """Convert a numerical score into a risk level."""
     if score >= 70:
         return "HIGH"
 
@@ -200,11 +170,7 @@ def get_risk_level(score: int) -> str:
 
 
 def get_risk_status(level: str) -> str:
-    """
-    Returns the recommended status associated
-    with the risk level.
-    """
-
+    """Return the recommended status for a risk level."""
     if level == "HIGH":
         return "AT_RISK"
 
@@ -214,16 +180,9 @@ def get_risk_status(level: str) -> str:
     return "NORMAL"
 
 
-# ─────────────────────────────────────────────
-# GET /api/risk
-# ─────────────────────────────────────────────
-
 @router.get("/")
 async def get_all_risks() -> dict[str, Any]:
-    """
-    Returns the risk information for all monitored samples.
-    """
-
+    """Return risk information for all monitored samples."""
     return {
         "success": True,
         "total": len(risk_data),
@@ -231,19 +190,15 @@ async def get_all_risks() -> dict[str, Any]:
     }
 
 
-# ─────────────────────────────────────────────
-# POST /api/risk/calculate
-# ─────────────────────────────────────────────
-
 @router.post("/calculate")
 async def calculate_risk(
     data: dict[str, Any],
 ) -> dict[str, Any]:
     """
-    Calculates the risk of a clinical sample.
+    Calculate risk using temperature, processing time
+    and transport time.
 
     Example request:
-
     {
         "sample_code": "A49281",
         "temperature": 8.7,
@@ -251,35 +206,54 @@ async def calculate_risk(
         "transport_minutes": 32
     }
     """
-
     sample_code = data.get("sample_code")
 
-    if not sample_code:
+    if not isinstance(sample_code, str) or not sample_code.strip():
         raise HTTPException(
             status_code=400,
             detail="sample_code is required.",
         )
 
-    temperature = float(
-        data.get("temperature", 5.0)
+    sample_code = sample_code.strip()
+
+    try:
+        temperature = float(data.get("temperature", 5.0))
+        processing_minutes = float(
+            data.get("processing_minutes", 0)
+        )
+        transport_minutes = float(
+            data.get("transport_minutes", 0)
+        )
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="Risk input values must be numeric.",
+        ) from None
+
+    input_values = (
+        temperature,
+        processing_minutes,
+        transport_minutes,
     )
 
-    processing_minutes = float(
-        data.get("processing_minutes", 0)
-    )
+    if not all(isfinite(value) for value in input_values):
+        raise HTTPException(
+            status_code=400,
+            detail="Risk input values must be finite numbers.",
+        )
 
-    transport_minutes = float(
-        data.get("transport_minutes", 0)
-    )
+    if processing_minutes < 0 or transport_minutes < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Processing and transport times cannot be negative.",
+        )
 
     temperature_risk = calculate_temperature_risk(
         temperature
     )
-
     processing_risk = calculate_processing_risk(
         processing_minutes
     )
-
     transport_risk = calculate_transport_risk(
         transport_minutes
     )
@@ -294,7 +268,7 @@ async def calculate_risk(
     level = get_risk_level(score)
     status = get_risk_status(level)
 
-    factors = []
+    factors: list[dict[str, Any]] = []
 
     if temperature_risk > 0:
         factors.append(
@@ -345,8 +319,9 @@ async def calculate_risk(
         )
     else:
         recommendation = (
-            "Las condiciones actuales de la muestra "
-            "se encuentran dentro de los parámetros esperados."
+            "Las condiciones evaluadas tienen una "
+            "puntuación de riesgo baja. Confirmar los "
+            "requisitos específicos para este tipo de muestra."
         )
 
     result = {
@@ -359,8 +334,7 @@ async def calculate_risk(
     }
 
     # Temporary in-memory storage.
-    # This will later be handled by risk_service.py
-    # and PostgreSQL.
+    # PostgreSQL persistence will be implemented later.
     risk_data[sample_code] = result
 
     return {
@@ -369,45 +343,11 @@ async def calculate_risk(
     }
 
 
-# ─────────────────────────────────────────────
-# GET /api/risk/sample/{sample_code}
-# ─────────────────────────────────────────────
-
-@router.get("/sample/{sample_code}")
-async def get_sample_risk(
-    sample_code: str,
-) -> dict[str, Any]:
-    """
-    Returns the current risk analysis of a sample.
-    """
-
-    risk = risk_data.get(sample_code)
-
-    if risk is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Risk information not found for this sample.",
-        )
-
-    return {
-        "success": True,
-        "risk": risk,
-    }
-
-
-# ─────────────────────────────────────────────
-# GET /api/risk/sample/{sample_code}/factors
-# ─────────────────────────────────────────────
-
 @router.get("/sample/{sample_code}/factors")
 async def get_risk_factors(
     sample_code: str,
 ) -> dict[str, Any]:
-    """
-    Returns only the factors contributing to
-    the risk of a sample.
-    """
-
+    """Return the factors contributing to sample risk."""
     risk = risk_data.get(sample_code)
 
     if risk is None:
@@ -425,17 +365,28 @@ async def get_risk_factors(
     }
 
 
-# ─────────────────────────────────────────────
-# GET /api/risk/high
-# ─────────────────────────────────────────────
+@router.get("/sample/{sample_code}")
+async def get_sample_risk(
+    sample_code: str,
+) -> dict[str, Any]:
+    """Return the current risk analysis of a sample."""
+    risk = risk_data.get(sample_code)
+
+    if risk is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Risk information not found for this sample.",
+        )
+
+    return {
+        "success": True,
+        "risk": risk,
+    }
+
 
 @router.get("/high")
 async def get_high_risk_samples() -> dict[str, Any]:
-    """
-    Returns all samples currently classified
-    as high risk.
-    """
-
+    """Return samples currently classified as high risk."""
     high_risk = [
         risk
         for risk in risk_data.values()
@@ -449,33 +400,21 @@ async def get_high_risk_samples() -> dict[str, Any]:
     }
 
 
-# ─────────────────────────────────────────────
-# GET /api/risk/summary
-# ─────────────────────────────────────────────
-
 @router.get("/summary")
 async def get_risk_summary() -> dict[str, Any]:
-    """
-    Returns an overview of the current laboratory risk.
-    """
-
+    """Return an overview of current laboratory risk."""
     risks = list(risk_data.values())
 
     low = sum(
-        1
-        for risk in risks
+        1 for risk in risks
         if risk["level"] == "LOW"
     )
-
     medium = sum(
-        1
-        for risk in risks
+        1 for risk in risks
         if risk["level"] == "MEDIUM"
     )
-
     high = sum(
-        1
-        for risk in risks
+        1 for risk in risks
         if risk["level"] == "HIGH"
     )
 
@@ -492,23 +431,6 @@ async def get_risk_summary() -> dict[str, Any]:
             "low_risk": low,
             "medium_risk": medium,
             "high_risk": high,
-            "average_score": round(
-                average_score,
-                2,
-            ),
+            "average_score": round(average_score, 2),
         },
     }
-```
-
-Con esto ya tienes endpoints como:
-
-```text
-GET  /api/risk/
-POST /api/risk/calculate
-GET  /api/risk/sample/A49281
-GET  /api/risk/sample/A49281/factors
-GET  /api/risk/high
-GET  /api/risk/summary
-```
-
-Y lo importante para la competencia es que **el riesgo no sea solamente un número**: el endpoint devuelve los factores que provocaron el riesgo, por ejemplo temperatura, transporte y tiempo de procesamiento. Más adelante esos factores alimentarán el modelo de ML real.
