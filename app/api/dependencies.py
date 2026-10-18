@@ -1,34 +1,20 @@
+
 """
 Common API dependencies for LabGuardian AI.
 
-This module contains reusable dependencies that can be
-injected into FastAPI routes.
+Reusable dependencies injected into FastAPI routes.
 """
 
-from typing import Generator
+from typing import Any
 
-def get_current_user():
-"""
-Placeholder for the authenticated user dependency.
 
-```
-Authentication will be implemented later.
-"""
-return None
-```
+def get_current_user() -> None:
+    """Placeholder for future authentication."""
+    return None
 
-def get_request_context() -> dict:
-"""
-Returns common request context.
 
-```
-This can later include information such as:
-- current user
-- laboratory
-- permissions
-- request metadata
-"""
-return {
-    "service": "LabGuardian AI",
-}
-```
+def get_request_context() -> dict[str, Any]:
+    """Return common request context."""
+    return {
+        "service": "LabGuardian AI",
+    }

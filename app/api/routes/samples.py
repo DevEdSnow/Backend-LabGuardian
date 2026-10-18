@@ -1,4 +1,4 @@
-```python
+
 """
 Sample routes for LabGuardian AI.
 
@@ -646,26 +646,26 @@ async def delete_sample(
         "sample_id": sample_id,
         "sample_code": sample["code"],
     }
-```
 
-Con este archivo ya tienes la base para:
 
-```text
-GET    /api/samples/
-GET    /api/samples/{id}
-GET    /api/samples/code/{code}
-GET    /api/samples/{id}/status
-GET    /api/samples/{id}/passport
-GET    /api/samples/risk/high
-GET    /api/samples/status/{status}
+## Con este archivo ya tienes la base para:
 
-POST   /api/samples/
 
-PUT    /api/samples/{id}
-PATCH  /api/samples/{id}/status
-PATCH  /api/samples/{id}/risk
+##GET    /api/samples/
+##GET    /api/samples/{id}
+##GET    /api/samples/code/{code}
+##GET    /api/samples/{id}/status
+##GET    /api/samples/{id}/passport
+##GET    /api/samples/risk/high
+##GET    /api/samples/status/{status}
 
-DELETE /api/samples/{id}
-```
+##POST   /api/samples/
 
-**Ojo con el orden:** en FastAPI las rutas específicas como `/code/{sample_code}`, `/risk/high` y `/status/{status}` deben estar antes de `/{sample_id}`. En el archivo anterior están colocadas así para evitar que `"code"`, `"risk"` o `"status"` se intenten convertir en `int`.
+##PUT    /api/samples/{id}
+##PATCH  /api/samples/{id}/status
+##PATCH  /api/samples/{id}/risk
+
+##DELETE /api/samples/{id}
+
+
+## **Ojo con el orden:** en FastAPI las rutas específicas como `/code/{sample_code}`, `/risk/high` y `/status/{status}` deben estar antes de `/{sample_id}`. En el archivo anterior están colocadas así para evitar que `"code"`, `"risk"` o `"status"` se intenten convertir en `int`.
